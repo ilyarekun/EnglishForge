@@ -766,12 +766,16 @@ function buildPracticePrompt_(practiceWords) {
   const payload = practiceWords.map((w, i) => ({
     exerciseNumber: i + 1,
     answer: w.practiceAnswer,
-    meaning: w.russian,
+    russianMeaning: w.russian,
   }));
 
   return (
     'Create one English fill-in-the-blank sentence for each target item.\n' +
     'The learner must fill in the missing English word or phrase.\n\n' +
+    'Each item includes a Russian translation (russianMeaning). It is the\n' +
+    'AUTHORITATIVE definition of the intended sense of the English answer.\n' +
+    'If the English word is polysemous, the sentence MUST reflect the meaning\n' +
+    'given in russianMeaning, not any other dictionary sense.\n\n' +
     'Rules:\n' +
     '1. Output only a JSON array. No Markdown. No explanations.\n' +
     '2. Return items in exactly the same order as the input array.\n' +
@@ -781,8 +785,13 @@ function buildPracticePrompt_(practiceWords) {
     '6. Sentence must contain exactly one blank token: EXACTLY five underscores in a row: _____\n' +
     '7. Never use 3, 4, 6, or any other count of underscores. Always 5.\n' +
     '8. Do not reveal the answer anywhere inside the sentence.\n' +
-    '9. Sentences must be natural, simple, useful for practice.\n' +
-    '10. Do not use Russian, em dashes, or en dashes.\n\n' +
+    '9. The sentence context must unambiguously match russianMeaning.\n' +
+    '   If russianMeaning lists several senses separated by "/" or ",",\n' +
+    '   pick any ONE of them and build the sentence around that sense.\n' +
+    '10. Sentences must be natural, simple, useful for practice.\n' +
+    '11. Do not use Russian text, em dashes, or en dashes in the sentence field.\n\n' +
+    'Example input item:\n' +
+    '{"exerciseNumber":1,"answer":"face the music","russianMeaning":"расхлёбывать последствия"}\n' +
     'Example output:\n' +
     '[{"exerciseNumber":1,"answer":"face the music","sentence":"After making a mistake, he had to _____ and explain."}]\n\n' +
     'Target items:\n' +
