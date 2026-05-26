@@ -13,9 +13,10 @@ Architecture: **Google Sheets** stores the vocabulary and statistics, **Apps Scr
 3. [Bot commands](#bot-commands)
 4. [Editor functions](#editor-functions)
 5. [How word selection works](#how-word-selection-works)
-6. [Sheet structure](#sheet-structure)
-7. [Script Properties](#script-properties)
-8. [Troubleshooting](#troubleshooting)
+6. [How practice sentences are generated](#how-practice-sentences-are-generated)
+7. [Sheet structure](#sheet-structure)
+8. [Script Properties](#script-properties)
+9. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -179,7 +180,7 @@ This automatically:
 2. Creates the `_service_cols`, `_english_forge_state`, `_english_forge_log` sheets (if missing).
 3. Initializes service columns for all your words (mastery_level = 0 for new ones, or migrates from existing data if you had an older schema).
 4. Picks 10 words via the algorithm.
-5. Shuffles them and asks GPT to generate practice sentences (~5-10 seconds).
+5. Shuffles them and asks GPT to generate practice sentences (~5-10 seconds). The prompt sends each English word together with its Russian translation from the sheet - GPT treats the translation as the authoritative meaning, so for polysemous words it picks the exact sense you are learning.
 6. Sends one big combined message to the Telegram group:
    - List of 10 Russian translations in original order.
    - Each with the English answer hidden under a `<tg-spoiler>` (tapping reveals only that one spoiler).
@@ -312,6 +313,22 @@ To avoid sessions of "all new" or "all known" by chance, when `dailyCount >= 3` 
 - 1 KNOWN (level 3+)
 
 The remaining slots are filled by weighted random.
+
+---
+
+## How practice sentences are generated
+
+Once the words for a session are picked, the bot builds a JSON payload and sends it to OpenAI in one request. Each item carries three fields:
+
+- `exerciseNumber` - position in the batch,
+- `answer` - the English word/phrase from column B,
+- `russianMeaning` - the Russian translation from column C.
+
+The prompt declares `russianMeaning` to be the **authoritative definition** of the sense the learner is practicing. This matters for polysemous words: e.g. `face` can mean "лицо" or "столкнуться с / расхлёбывать". Without the translation GPT would pick a sense on its own, and the resulting sentence might drift to a meaning you are not learning.
+
+If column C lists multiple senses separated by `/` or `,` (for example, `ключевой / крайне важный`), GPT is instructed to pick **one** of them and build the sentence around that single sense, instead of trying to cover all of them at once.
+
+GPT returns a JSON array; each item carries the same `exerciseNumber`, the same `answer`, and a generated `sentence` with a `_____` blank. If JSON parsing fails or the model returns something off, the specific line falls back to `Please use _____ in this sentence.` and the rest of the session continues normally.
 
 ---
 
