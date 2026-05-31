@@ -253,6 +253,7 @@ Run from Apps Script (pick the function at the top -> Run).
 | `sendDailyWordsCron` | The one you put in the daily trigger. |
 | `forceResetSession` | Clear the active session + reset LAST_UPDATE_ID. Does NOT touch stats. |
 | `resetLearningProgress` | **Wipe ALL progress**: shown/correct/wrong/mastery_level -> 0 for every word. DAY_ZERO_DATE = today. Clears the session. |
+| `repairMasteryLevels` | **One-time migration** after the selection redesign. Moves already-shown words stuck at `mastery_level = 0` into STRUGGLING/LEARNING and makes them due today. Run once. Safe to re-run. |
 | `setWebhook` | Set the Telegram webhook to the current deployment. Auto-detects URL from `WEBHOOK_URL` property or `ScriptApp.getService().getUrl()`. |
 | `dropTelegramBacklog` | Clear the Telegram retry queue (without changing the webhook URL). |
 | `diagnoseWebhook` | Print `getWebhookInfo` to the log (URL, pending_update_count, last_error). |
@@ -277,12 +278,15 @@ Every word has a **mastery_level** from 0 to 5:
 ### Level transitions
 
 - **Correct answer:** level `+1` (capped at 5).
-- **Wrong answer:** level `-2` (floored at 0).
+- **Wrong answer:** level `-2`, but **floored at 1** (not 0).
+
+The floor of 1 is the key point: once a word has been attempted, it is never "new" again. **Level 0 strictly means "never shown".** Fail a new word and it immediately becomes STRUGGLING (1) and enters the priority pool, instead of falling back into the pile of unseen words.
 
 This means:
 - Word at level 5, missed once -> dropped to 3 (still KNOWN).
 - Missed twice in a row -> dropped to 1 (STRUGGLING, falls out of known).
-- Failed 5 times in a row -> stuck at 0/1 plus the leech bonus.
+- New word (0) failed -> becomes 1 (STRUGGLING).
+- Keep failing the same word -> it sticks at 1 (does not grow without bound) until you get it right. Selection is plastic: learn it -> level rises -> it shows up less often.
 
 ### Weights for weighted random
 
@@ -290,29 +294,31 @@ In each session the bot first filters out words that are "due" today (`next_due 
 
 ```
 base = 1
-+ mastery_level bonus:
-    L0 -> +5
-    L1 -> +10  <- highest priority (words you don't remember)
-    L2 -> +6
++ mastery_level bonus (the main signal is the plastic level, not an error counter):
+    L0 -> +4   (new words; actual intake is throttled by a quota, not by weight)
+    L1 -> +12  <- highest priority (words you keep failing)
+    L2 -> +7
     L3 -> +2
     L4 -> +1
     L5 -> 0
-+ leech bonus +5 if wrong_count >= 5 and level <= 2
 + days_since bonus (+1/+2/+3/+4 for 3/7/14/30 days since last shown)
+    ONLY for words with a non-empty last_shown - i.e. actually shown before.
+    Never-seen words do NOT get this bonus (otherwise hundreds of new words
+    would outweigh real failures).
 + scale = 1 + dailyCount/20 (multiplier for L-bonuses and days bonuses)
-+ vocab boost +2 if words > dailyCount * 10 and level = 0
 ```
 
-From this pool, N words are picked randomly, proportional to weight.
+From each pool, the needed number of words is picked randomly, proportional to weight.
 
-### Diversity guarantee
+### Session composition (quotas)
 
-To avoid sessions of "all new" or "all known" by chance, when `dailyCount >= 3` the bot guarantees at least one word from each of the three categories (if any exist in the due pool):
-- 1 NEW (level 0)
-- 1 STRUGGLING (level 1-2)
-- 1 KNOWN (level 3+)
+Instead of a lottery over the whole vocabulary, a session is assembled by quotas so the bulk is words you're failing, new words trickle in, and known words occasionally come back as a check:
 
-The remaining slots are filled by weighted random.
+1. **Bulk = the words you're failing** (L1-L2).
+2. **New words - intake ~30%**, dropping to ~20% when `failing >= dailyCount` and to 1 when `failing >= dailyCount * 2` (big backlog -> fewer new words, so you clear it instead of drowning). At least 1 while new words remain.
+3. **Review of known words - ~10%**, only if some L3+ word has come due (`next_due`).
+4. Unused slots are backfilled: more failing -> more new -> more review. Once the backlog is cleared, new words flow in faster.
+5. Last resort (the due pool is too small) - top up from all words.
 
 ---
 
