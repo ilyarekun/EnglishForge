@@ -593,37 +593,38 @@ function isDue_(word) {
 
 function weightWord_(word, dailyCount, totalWords) {
   // scale grows with dailyCount so larger sessions shift harder toward
-  // struggling/new words: 5 → 1.25, 10 → 1.50, 20 → 2.00, 50 → 3.50.
+  // struggling words: 5 → 1.25, 10 → 1.50, 20 → 2.00, 50 → 3.50.
   const scale = 1 + dailyCount / 20;
   let weight = 1;
 
-  // Mastery-level priority (the main signal). Levels:
-  //   0 NEW            — never shown
-  //   1 STRUGGLING     — has been tried, currently failing
+  // Mastery-level priority (the main signal). The PLASTIC level — not any
+  // ever-growing wrong counter — drives selection, so a word stops being
+  // hammered as soon as you actually learn it. Levels:
+  //   0 NEW            — never attempted (intake is throttled by quota, not weight)
+  //   1 STRUGGLING     — attempted, currently failing  → top priority
   //   2 LEARNING       — starting to stick
   //   3 JUST KNOWN     — first time over the threshold
   //   4 KNOWN          — stable
   //   5 MASTERED       — long-term memory; only shows via due-date
   const level = word.masteryLevel || 0;
-  if (level === 0) weight += Math.round(5 * scale);
-  else if (level === 1) weight += Math.round(10 * scale);
-  else if (level === 2) weight += Math.round(6 * scale);
+  if (level === 0) weight += Math.round(4 * scale);
+  else if (level === 1) weight += Math.round(12 * scale);
+  else if (level === 2) weight += Math.round(7 * scale);
   else if (level === 3) weight += Math.round(2 * scale);
   else if (level === 4) weight += 1;
   // level 5: no bonus, sees the light only when next_due hits.
 
-  // Leech: tried >=5 times and still stuck in levels 0-2.
-  if (word.wrongCount >= 5 && level <= 2) weight += 5;
-
-  // Forgetting catch-up — neglected words gradually resurface.
-  const days = daysSince_(word.lastShown);
-  if (days >= 30) weight += Math.round(4 * scale);
-  else if (days >= 14) weight += Math.round(3 * scale);
-  else if (days >= 7) weight += Math.round(2 * scale);
-  else if (days >= 3) weight += 1;
-
-  // Extra nudge for new words when vocab dwarfs the session size.
-  if (totalWords > dailyCount * 10 && level === 0) weight += 2;
+  // Forgetting catch-up — gradually resurface words you ONCE saw and may be
+  // forgetting. Only for words actually shown before: an empty last_shown
+  // means "never attempted", which must NOT borrow this neglected-word bonus
+  // (that was the old bug that let 500+ unseen words outweigh real failures).
+  if (word.lastShown) {
+    const days = daysSince_(word.lastShown);
+    if (days >= 30) weight += Math.round(4 * scale);
+    else if (days >= 14) weight += Math.round(3 * scale);
+    else if (days >= 7) weight += Math.round(2 * scale);
+    else if (days >= 3) weight += 1;
+  }
 
   return Math.max(1, weight);
 }
@@ -649,44 +650,55 @@ function selectDailyWords_(words) {
   const dailyCount = getDailyWordsCount_();
   const due = words.filter(isDue_);
 
-  // FIX: diversity by mastery level. Guarantee at least one from each of
-  // {new, struggling, known} categories when possible. The rest of the
-  // session is filled by weighted random.
-  const newDue = due.filter(w => (w.masteryLevel || 0) === 0);
-  const strugglingDue = due.filter(w => {
+  // Composition goal (the word cycle the user wants):
+  //   - The BULK of every session is the words you keep failing.
+  //   - A small TRICKLE of brand-new words keeps introducing the backlog,
+  //     and the trickle shrinks when you're already drowning in failures.
+  //   - An OCCASIONAL spaced check of a word you already know — only when one
+  //     comes due (mastered words surface ~monthly, known ~biweekly, etc.).
+  const failing = due.filter(w => {
     const lvl = w.masteryLevel || 0;
-    return lvl >= 1 && lvl <= 2;
+    return lvl >= 1 && lvl <= 2;           // STRUGGLING + LEARNING — priority
   });
-  const knownDue = due.filter(w => (w.masteryLevel || 0) >= 3);
+  const fresh = due.filter(w => (w.masteryLevel || 0) === 0);   // never attempted
+  const review = due.filter(w => (w.masteryLevel || 0) >= 3);   // known/mastered, due
+
+  // New-word intake: ~30% of the session, dropping to ~20% then 1 as the
+  // backlog of words you're failing grows. Always at least 1 so intake
+  // never fully stalls (while fresh words remain).
+  let newQuota = Math.max(1, Math.round(dailyCount * 0.3));
+  if (failing.length >= dailyCount) newQuota = Math.max(1, Math.round(dailyCount * 0.2));
+  if (failing.length >= dailyCount * 2) newQuota = 1;
+
+  // Spaced review: ~10% of the session, but only if any known word is due.
+  const reviewQuota = review.length > 0 ? Math.max(1, Math.round(dailyCount * 0.1)) : 0;
 
   let selected = [];
-  if (dailyCount >= 3) {
-    if (newDue.length > 0) {
-      const pick = weightedPick_(newDue, 1, words.length);
-      if (pick.length) selected.push(pick[0]);
-    }
-    if (strugglingDue.length > 0) {
-      const pick = weightedPick_(strugglingDue, 1, words.length);
-      if (pick.length) selected.push(pick[0]);
-    }
-    if (knownDue.length > 0) {
-      const pick = weightedPick_(knownDue, 1, words.length);
-      if (pick.length) selected.push(pick[0]);
-    }
-  }
+  const taken = new Set();
+  const take = (pool, n) => {
+    if (n <= 0 || pool.length === 0) return;
+    const avail = pool.filter(w => !taken.has(w.rowNumber));
+    if (avail.length === 0) return;
+    const picked = weightedPick_(avail, Math.min(n, avail.length), words.length);
+    picked.forEach(w => { selected.push(w); taken.add(w.rowNumber); });
+  };
 
-  // Fill the rest from the full due pool (minus already-picked).
-  const taken = new Set(selected.map(w => w.rowNumber));
-  const remaining = due.filter(w => !taken.has(w.rowNumber));
-  const extra = weightedPick_(remaining, dailyCount - selected.length, words.length);
-  selected = selected.concat(extra);
+  // 1. The words you're failing fill most of the session.
+  take(failing, dailyCount - newQuota - reviewQuota);
+  // 2. A trickle of brand-new words.
+  take(fresh, Math.min(newQuota, dailyCount - selected.length));
+  // 3. An occasional check of something you already know.
+  take(review, Math.min(reviewQuota, dailyCount - selected.length));
 
-  // Last-resort fallback: top up from all words if due pool was too small.
+  // 4. Backfill unused slots: more failing, then more new, then more review.
+  //    (e.g. once the failing backlog is cleared, new words flow in faster.)
+  take(failing, dailyCount - selected.length);
+  take(fresh, dailyCount - selected.length);
+  take(review, dailyCount - selected.length);
+
+  // 5. Last-resort: top up from all words if the due pool was too small.
   if (selected.length < dailyCount) {
-    const taken2 = new Set(selected.map(w => w.rowNumber));
-    const fallback = words.filter(w => !taken2.has(w.rowNumber));
-    const extra2 = weightedPick_(fallback, dailyCount - selected.length, words.length);
-    selected = selected.concat(extra2);
+    take(words, dailyCount - selected.length);
   }
 
   return selected.slice(0, dailyCount);
@@ -1142,6 +1154,48 @@ function forceResetSession() {
   Logger.log('Session cleared, LAST_UPDATE_ID reset.');
 }
 
+// One-time repair after the selection redesign. Old logic left every word
+// you failed at mastery_level 0 ("new"), so failures never entered the
+// struggling pool. This reclassifies any ATTEMPTED word (shown_count > 0)
+// that is still sitting at level 0:
+//   - currently on a correct streak  → 2 (LEARNING)
+//   - otherwise (last answer wrong)  → 1 (STRUGGLING)
+// All repaired words become due today so they re-enter rotation immediately.
+// Safe to run more than once; it only touches level-0 attempted rows.
+function repairMasteryLevels() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) throw new Error('Previous request still processing.');
+  try {
+    setupServiceHeaders();
+    const { serviceSheet, words, serviceValues } = loadWords_();
+    const today = today_();
+    let fixed = 0;
+    words.forEach(w => {
+      const s = serviceValues[w.serviceIndex];
+      const shown = toNumber_(s[SERVICE.SHOWN_COUNT], 0);
+      const level = toNumber_(s[SERVICE.MASTERY_LEVEL], 0);
+      if (shown > 0 && level === 0) {
+        const streak = toNumber_(s[SERVICE.CORRECT_STREAK], 0);
+        const newLevel = streak > 0 ? 2 : 1;
+        s[SERVICE.MASTERY_LEVEL] = newLevel;
+        s[SERVICE.INTERVAL_DAYS] = intervalForLevel_(newLevel);
+        s[SERVICE.NEXT_DUE] = today;
+        s[SERVICE.IS_KNOWN] = 0;
+        fixed++;
+      }
+    });
+    if (serviceValues.length > 0) {
+      serviceSheet
+        .getRange(CONFIG.FIRST_DATA_ROW, CONFIG.SERVICE_START_COL, serviceValues.length, CONFIG.SERVICE_COLS_COUNT)
+        .setValues(serviceValues);
+    }
+    log_('repairMasteryLevels', `${fixed} words reclassified`);
+    Logger.log(`repairMasteryLevels: ${fixed} attempted level-0 words moved to struggling/learning.`);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 function resetLearningProgress() {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) throw new Error('Previous request still processing.');
@@ -1251,7 +1305,11 @@ function handleReply_(message, chatId) {
           word.masteryLevel = newLevel; word.isKnown = newLevel >= 3 ? 1 : 0;
         }
       } else {
-        const newLevel = Math.max(0, oldLevel - 2);
+        // Floor at 1, not 0: once a word has been attempted and failed it
+        // becomes STRUGGLING, never "new" again. Level 0 strictly means
+        // "never attempted". This is what feeds failures into the priority
+        // pool instead of dumping them back among the unseen words.
+        const newLevel = Math.max(1, oldLevel - 2);
         const newInterval = intervalForLevel_(newLevel);
         s[SERVICE.WRONG_COUNT] = toNumber_(s[SERVICE.WRONG_COUNT], 0) + 1;
         s[SERVICE.CORRECT_STREAK] = 0;
